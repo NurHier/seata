@@ -18,6 +18,7 @@ package io.seata.rm.datasource.undo;
 import io.seata.rm.datasource.DataCompareUtils;
 import io.seata.rm.datasource.sql.SQLType;
 import io.seata.rm.datasource.sql.struct.TableRecords;
+import io.seata.rm.datasource.undo.parser.FastjsonUndoLogParser;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -33,9 +34,9 @@ import java.util.List;
 public abstract class BaseUndoLogParserTest extends BaseH2Test{
 
     private final Logger LOGGER = LoggerFactory.getLogger(this.getClass());
-    
+
     public abstract UndoLogParser getParser();
-    
+
     @Test
     void testEncodeAndDecode() throws SQLException {
 
@@ -72,7 +73,7 @@ public abstract class BaseUndoLogParserTest extends BaseH2Test{
         logList.add(sqlUndoLog00);
         logList.add(sqlUndoLog01);
         originLog.setSqlUndoLogs(logList);
-        
+
         // start test
         byte[] bs = getParser().encode(originLog);
 
@@ -145,5 +146,76 @@ public abstract class BaseUndoLogParserTest extends BaseH2Test{
         long end = System.currentTimeMillis();
         LOGGER.info("elapsed time {} ms.", (end - start));
     }
-    
+
+    @Test
+    void testEncodeAndDecodeForMoreDataType() throws SQLException {
+
+        execSQL("INSERT INTO table_order(id, name, count, price, type, creator, time) VALUES (12345,'aaa', 10, 345.56, 1, 1234, now());");
+        execSQL("INSERT INTO table_order(id, name, count, price, type, creator, time) VALUES (12346,'aaa', 15, 500, 2, 1234, now());");
+
+        TableRecords beforeImage = execQuery(tableMetaMoreDataType, "SELECT * FROM table_order WHERE id IN (12345, 12346);");
+        execSQL("update table_order set name = 'xxx' where id in (12345, 12346);");
+        TableRecords afterImage = execQuery(tableMetaMoreDataType, "SELECT * FROM table_order WHERE id IN (12345, 12346);");
+
+        TableRecords beforeImage2 = execQuery(tableMetaMoreDataType, "SELECT * FROM table_order WHERE id IN (12345, 12346);");
+        execSQL("INSERT INTO table_order(id, name, count, price, type, creator, time) VALUES (12347,'aaa', 20, 1500, 3, 1234, now());");
+        execSQL("INSERT INTO table_order(id, name, count, price, type, creator, time) VALUES (12348,'aaa', 25, 3500, 4, 1234, now());");
+        TableRecords afterImage2 = execQuery(tableMetaMoreDataType, "SELECT * FROM table_order WHERE id IN (12345, 12346);");
+
+        SQLUndoLog sqlUndoLog00 = new SQLUndoLog();
+        sqlUndoLog00.setSqlType(SQLType.UPDATE);
+        sqlUndoLog00.setTableMeta(tableMetaMoreDataType);
+        sqlUndoLog00.setTableName("table_order");
+        sqlUndoLog00.setBeforeImage(beforeImage);
+        sqlUndoLog00.setAfterImage(afterImage);
+
+        SQLUndoLog sqlUndoLog01 = new SQLUndoLog();
+        sqlUndoLog01.setSqlType(SQLType.UPDATE);
+        sqlUndoLog01.setTableMeta(tableMetaMoreDataType);
+        sqlUndoLog01.setTableName("table_order");
+        sqlUndoLog01.setBeforeImage(beforeImage2);
+        sqlUndoLog01.setAfterImage(afterImage2);
+
+        BranchUndoLog originLog = new BranchUndoLog();
+        originLog.setBranchId(123456L);
+        originLog.setXid("xiddddddddddd");
+        List<SQLUndoLog> logList = new ArrayList<>();
+        logList.add(sqlUndoLog00);
+        logList.add(sqlUndoLog01);
+        originLog.setSqlUndoLogs(logList);
+
+        // start test
+        byte[] bs = getParser().encode(originLog);
+
+        Assertions.assertNotNull(bs);
+
+        LOGGER.info("data size:{}", bs.length);
+
+        BranchUndoLog dstLog = getParser().decode(bs);
+
+        Assertions.assertEquals(originLog.getBranchId(), dstLog.getBranchId());
+        Assertions.assertEquals(originLog.getXid(), dstLog.getXid());
+        Assertions.assertEquals(originLog.getSqlUndoLogs().size(), dstLog.getSqlUndoLogs().size());
+        List<SQLUndoLog> logList2 = dstLog.getSqlUndoLogs();
+        SQLUndoLog sqlUndoLog10 = logList2.get(0);
+        SQLUndoLog sqlUndoLog11 = logList2.get(1);
+        Assertions.assertEquals(sqlUndoLog00.getSqlType(), sqlUndoLog10.getSqlType());
+        Assertions.assertEquals(sqlUndoLog00.getTableName(), sqlUndoLog10.getTableName());
+        Assertions.assertEquals(sqlUndoLog01.getSqlType(), sqlUndoLog11.getSqlType());
+        Assertions.assertEquals(sqlUndoLog01.getTableName(), sqlUndoLog11.getTableName());
+        // if Field value data type is Long, the fastjson will convert it to Integer，so Field`s value is not equal
+        // caucho hessian serialization can not get right value of decimal, but we can use 'alibaba dubbo hessian' to resolve it.
+        if (FastjsonUndoLogParser.NAME.equals(getParser().getName())) {
+            Assertions.assertFalse(DataCompareUtils.isRecordsEquals(sqlUndoLog00.getBeforeImage(), sqlUndoLog10.getBeforeImage()));
+            Assertions.assertFalse(DataCompareUtils.isRecordsEquals(sqlUndoLog00.getAfterImage(), sqlUndoLog10.getAfterImage()));
+            Assertions.assertFalse(DataCompareUtils.isRecordsEquals(sqlUndoLog01.getBeforeImage(), sqlUndoLog11.getBeforeImage()));
+            Assertions.assertFalse(DataCompareUtils.isRecordsEquals(sqlUndoLog01.getAfterImage(), sqlUndoLog11.getAfterImage()));
+        } else {
+            Assertions.assertTrue(DataCompareUtils.isRecordsEquals(sqlUndoLog00.getBeforeImage(), sqlUndoLog10.getBeforeImage()));
+            Assertions.assertTrue(DataCompareUtils.isRecordsEquals(sqlUndoLog00.getAfterImage(), sqlUndoLog10.getAfterImage()));
+            Assertions.assertTrue(DataCompareUtils.isRecordsEquals(sqlUndoLog01.getBeforeImage(), sqlUndoLog11.getBeforeImage()));
+            Assertions.assertTrue(DataCompareUtils.isRecordsEquals(sqlUndoLog01.getAfterImage(), sqlUndoLog11.getAfterImage()));
+        }
+        LOGGER.info("serialization parser: {}", getParser().getName());
+    }
 }
